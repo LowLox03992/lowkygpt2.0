@@ -10,17 +10,38 @@ const client = new Client({
   ],
 });
 
-// ✅ Client OpenAI SDK mais branché sur Groq (OpenAI-compatible)
+// Groq (OpenAI-compatible)
 const groq = new OpenAI({
   apiKey: process.env.GROQ_API_KEY,
-  baseURL: "https://api.groq.com/openai/v1", // Groq base URL :contentReference[oaicite:3]{index=3}
+  baseURL: "https://api.groq.com/openai/v1",
 });
 
-// 🎭 Personnalité par salon (optionnel). Mets les IDs de salons.
+// 🎭 Personnalité par salon (optionnel)
 const rolesByChannel = {
   // "123456789012345678": "Tu es un assistant clair et sympa.",
-  // "234567890123456789": "Tu es un dev senior, réponses très techniques.",
+  // "234567890123456789": "Tu es un dev senior, très technique.",
 };
+
+// 🧠 Mémoire par salon (RAM)
+const memoryByChannel = new Map();
+
+// Réglages mémoire
+const MAX_TURNS = 12; // nombre de messages gardés (user+assistant)
+const MAX_CHARS_PER_MSG = 1500; // évite les pavés trop longs
+
+function getChannelMemory(channelId) {
+  if (!memoryByChannel.has(channelId)) memoryByChannel.set(channelId, []);
+  return memoryByChannel.get(channelId);
+}
+
+function pushToMemory(channelId, role, content) {
+  const mem = getChannelMemory(channelId);
+  const safe = (content || "").slice(0, MAX_CHARS_PER_MSG);
+  mem.push({ role, content: safe });
+
+  // garde seulement les derniers échanges
+  while (mem.length > MAX_TURNS * 2) mem.shift();
+}
 
 client.on("clientReady", () => {
   console.log("Bot connecté !");
@@ -31,29 +52,58 @@ client.on("messageCreate", async (message) => {
   if (!message.mentions.has(client.user)) return;
 
   const content = message.content.replace(`<@${client.user.id}>`, "").trim();
-  const systemRole = rolesByChannel[message.channel.id] || "Tu es un assistant utile et concis.";
+  const channelId = message.channel.id;
+
+  // commande pour reset la mémoire du salon
+  if (content.toLowerCase() === "reset") {
+    memoryByChannel.set(channelId, []);
+    return message.reply("🧠 Mémoire du salon réinitialisée.");
+  }
+
+  const systemRole =
+    rolesByChannel[channelId] || "Tu es un assistant utile, naturel et concis.";
 
   try {
-    // 🖼️ Images gratuites via Pollinations
+    // 🖼️ Images gratuites (Pollinations)
     if (content.toLowerCase().startsWith("image")) {
       const prompt = content.slice("image".length).trim() || "une image stylée";
-      const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}`;
+      const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(
+        prompt
+      )}`;
+      // (Optionnel) mémoriser le prompt image comme contexte
+      pushToMemory(channelId, "user", `[DEMANDE IMAGE] ${prompt}`);
+      pushToMemory(channelId, "assistant", `[IMAGE] ${url}`);
       return message.reply(url);
     }
 
-    // 🤖 Texte via Groq
+    // 🧠 Construire messages avec mémoire
+    const mem = getChannelMemory(channelId);
+
+    // Ajoute le message utilisateur à la mémoire
+    pushToMemory(channelId, "user", content);
+
+    const messages = [
+      { role: "system", content: systemRole },
+      ...mem,
+    ];
+
     const resp = await groq.chat.completions.create({
-      model: "llama-3.1-8b-instant", // modèle Groq (rapide). Liste dispo via /models :contentReference[oaicite:4]{index=4}
-      messages: [
-        { role: "system", content: systemRole },
-        { role: "user", content },
-      ],
+      model: "llama-3.1-8b-instant",
+      messages,
     });
 
-    return message.reply(resp.choices?.[0]?.message?.content ?? "Je n'ai pas pu répondre.");
+    const answer =
+      resp.choices?.[0]?.message?.content?.trim() || "Je n'ai pas pu répondre.";
+
+    // Ajoute la réponse à la mémoire
+    pushToMemory(channelId, "assistant", answer);
+
+    return message.reply(answer);
   } catch (err) {
     console.error(err);
-    return message.reply("⚠️ Erreur IA (Groq). Vérifie ta clé GROQ_API_KEY.");
+    return message.reply(
+      "⚠️ Erreur IA. Vérifie GROQ_API_KEY ou réessaie dans 10 secondes."
+    );
   }
 });
 
